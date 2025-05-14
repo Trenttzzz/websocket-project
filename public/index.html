@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebSocket vs gRPC Chat Room</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-container">
+    <header>
+      <h1>WebSocket vs gRPC Chat Application</h1>
+      <div id="connection-status">
+        <span class="status-indicator offline"></span>
+        <span class="status-text">Disconnected</span>
+      </div>
+    </header>
+
+    <div id="auth-container" class="auth-container">
+      <h2>Login or Register</h2>
+      <form id="auth-form">
+        <div class="form-group">
+          <label for="username">Username</label>
+          <input type="text" id="username" placeholder="Enter username" required>
+        </div>
+        <div class="form-group">
+          <label for="password">Password</label>
+          <input type="password" id="password" placeholder="Enter password" required>
+        </div>
+        <div class="button-group">
+          <button type="button" id="login-btn" class="primary-btn">Login</button>
+          <button type="button" id="register-btn" class="secondary-btn">Register</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="chat-container" class="chat-container hidden">
+      <div class="sidebar">
+        <div class="room-controls">
+          <h3>Chat Rooms</h3>
+          <button id="create-room-btn" class="primary-btn">Create Room</button>
+        </div>
+        <div id="rooms-list" class="rooms-list">
+          <!-- Room list will be populated here -->
+        </div>
+        <div class="protocol-switch">
+          <label>Protocol:</label>
+          <div class="switch-container">
+            <label class="switch">
+              <input type="checkbox" id="protocol-switch">
+              <span class="slider"></span>
+            </label>
+            <span id="protocol-type">WebSocket</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="chat-main">
+        <div class="chat-header">
+          <h2 id="room-name">Select a Room</h2>
+          <span id="room-users-count" class="users-count">0 users</span>
+        </div>
+        <div id="message-container" class="message-container">
+          <!-- Messages will be populated here -->
+        </div>
+        <form id="message-form" class="message-form">
+          <input type="text" id="message-input" placeholder="Type a message..." disabled>
+          <button type="submit" id="send-btn" disabled>Send</button>
+        </form>
+      </div>
+      
+      <div class="performance-sidebar">
+        <h3>Performance Tests</h3>
+        <div class="test-controls">
+          <select id="test-size">
+            <option value="small">Small Payload (1KB)</option>
+            <option value="medium">Medium Payload (10KB)</option>
+            <option value="large">Large Payload (100KB)</option>
+          </select>
+          <button id="test-websocket" class="primary-btn">Test WebSocket</button>
+          <button id="test-grpc" class="primary-btn">Test gRPC</button>
+        </div>
+        <div class="test-results">
+          <h4>Results</h4>
+          <div id="websocket-results">
+            <h5>WebSocket</h5>
+            <p>Latency: <span id="ws-latency">-</span> ms</p>
+            <p>Throughput: <span id="ws-throughput">-</span> KB/s</p>
+          </div>
+          <div id="grpc-results">
+            <h5>gRPC</h5>
+            <p>Latency: <span id="grpc-latency">-</span> ms</p>
+            <p>Throughput: <span id="grpc-throughput">-</span> KB/s</p>
+          </div>
+          <canvas id="performance-chart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <div id="create-room-modal" class="modal">
+      <div class="modal-content">
+        <span class="close">&times;</span>
+        <h2>Create a New Room</h2>
+        <form id="create-room-form">
+          <div class="form-group">
+            <label for="room-name">Room Name</label>
+            <input type="text" id="room-name-input" placeholder="Enter room name" required>
+          </div>
+          <div class="form-group">
+            <label for="room-description">Description</label>
+            <textarea id="room-description" placeholder="Enter room description"></textarea>
+          </div>
+          <div class="form-group">
+            <label for="max-connections">Maximum Connections</label>
+            <input type="number" id="max-connections" min="2" max="100" value="10">
+          </div>
+          <button type="submit" class="primary-btn">Create Room</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Socket.io client library -->
+  <script src="/socket.io/socket.io.js"></script>
+  <!-- Chart.js for performance visualization -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- Application scripts -->
+  <script src="script.js"></script>
+</body>
+</html>

@@ -1,0 +1,148 @@
+syntax = "proto3";
+
+package chat;
+
+service ChatService {
+  // Authentication
+  rpc Login (LoginRequest) returns (LoginResponse);
+  
+  // Room operations
+  rpc ListRooms (ListRoomsRequest) returns (ListRoomsResponse);
+  rpc JoinRoom (JoinRoomRequest) returns (JoinRoomResponse);
+  rpc LeaveRoom (LeaveRoomRequest) returns (LeaveRoomResponse);
+  
+  // Message operations
+  rpc SendMessage (SendMessageRequest) returns (SendMessageResponse);
+  rpc GetMessages (GetMessagesRequest) returns (GetMessagesResponse);
+  
+  // Speed test for performance comparison
+  rpc SpeedTest (SpeedTestRequest) returns (SpeedTestResponse);
+  
+  // Stream for real-time messages (similar to WebSocket functionality)
+  rpc MessageStream (MessageStreamRequest) returns (stream MessageStreamResponse);
+}
+
+// Authentication
+message LoginRequest {
+  string username = 1;
+  string password = 2;
+}
+
+message LoginResponse {
+  bool success = 1;
+  string token = 2;
+  string error_message = 3;
+  UserInfo user = 4;
+}
+
+// Room operations
+message ListRoomsRequest {
+  string token = 1;
+}
+
+message RoomInfo {
+  string id = 1;
+  string name = 2;
+  string description = 3;
+  string created_by = 4;
+  int64 created_at = 5;
+  int32 active_connections = 6;
+  int32 max_connections = 7;
+  bool is_full = 8;
+}
+
+message ListRoomsResponse {
+  bool success = 1;
+  repeated RoomInfo rooms = 2;
+  string error_message = 3;
+}
+
+message JoinRoomRequest {
+  string token = 1;
+  string room_id = 2;
+}
+
+message JoinRoomResponse {
+  bool success = 1;
+  string error_message = 2;
+  RoomInfo room = 3;
+}
+
+message LeaveRoomRequest {
+  string token = 1;
+  string room_id = 2;
+}
+
+message LeaveRoomResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+// Messages
+message UserInfo {
+  string id = 1;
+  string username = 2;
+}
+
+message MessageInfo {
+  string id = 1;
+  string room_id = 2;
+  UserInfo user = 3;
+  string text = 4;
+  string type = 5;
+  int64 created_at = 6;
+}
+
+message SendMessageRequest {
+  string token = 1;
+  string room_id = 2;
+  string text = 3;
+}
+
+message SendMessageResponse {
+  bool success = 1;
+  string error_message = 2;
+  MessageInfo message = 3;
+}
+
+message GetMessagesRequest {
+  string token = 1;
+  string room_id = 2;
+  int32 limit = 3;
+  int32 skip = 4;
+}
+
+message GetMessagesResponse {
+  bool success = 1;
+  string error_message = 2;
+  repeated MessageInfo messages = 3;
+}
+
+// Speed test for performance comparison
+message SpeedTestRequest {
+  string token = 1;
+  int64 timestamp = 2;
+  bytes payload = 3;
+}
+
+message SpeedTestResponse {
+  int64 sent_timestamp = 1;
+  int64 received_timestamp = 2;
+  int64 response_timestamp = 3;
+  int64 latency = 4;
+  int32 payload_size = 5;
+}
+
+// Message streaming
+message MessageStreamRequest {
+  string token = 1;
+  string room_id = 2;
+}
+
+message MessageStreamResponse {
+  string event_type = 1;
+  MessageInfo message = 2;
+  UserInfo user = 3;
+  string room_id = 4;
+  int64 timestamp = 5;
+}
