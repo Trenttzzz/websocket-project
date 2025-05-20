@@ -108,4 +108,47 @@ router.get('/rooms/:roomId/messages', auth, async (req, res) => {
   }
 });
 
+// Delete a room
+router.delete('/rooms/:roomId', auth, async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    
+    // Find the room
+    const room = await Room.findById(roomId);
+    if (!room) {
+      return res.status(404).json({
+        success: false,
+        message: 'Room not found'
+      });
+    }
+    
+    // Check if user is the creator of the room
+    if (room.createdBy.toString() !== req.user.id) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only the room creator can delete a room'
+      });
+    }
+    
+    // Delete all messages in the room
+    await Message.deleteMany({ roomId });
+    
+    // Delete the room
+    await Room.findByIdAndDelete(roomId);
+    
+    // Emit room deleted event
+    const { roomEvents } = require('../server'); // Import the event emitter
+    roomEvents.emit('room:deleted', roomId);
+    
+    // Success response
+    res.json({
+      success: true,
+      message: 'Room deleted successfully'
+    });
+  } catch (error) {
+    console.error('Error deleting room:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 module.exports = router;

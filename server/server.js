@@ -11,7 +11,6 @@ const { initializeHeartbeat, setupInactiveConnectionsMonitor } = require('./util
 const Room = require('./models/Room');
 const User = require('./models/User');
 const Message = require('./models/Message');
-const { startGrpcServer } = require('./grpc/grpcServer'); // Import server gRPC
 
 // Routes
 const authRoutes = require('./routes/auth');
@@ -20,7 +19,6 @@ const chatRoutes = require('./routes/chat');
 // Initialization
 const app = express();
 const PORT = process.env.PORT || 3000;
-const GRPC_PORT = process.env.GRPC_PORT || 50051;
 const isProduction = process.env.NODE_ENV === 'production';
 
 // Middleware
@@ -32,16 +30,34 @@ app.use(express.static(path.join(__dirname, '../public')));
 app.use('/api/auth', authRoutes);
 app.use('/api/chat', chatRoutes);
 
+// Custom event emitter for room deletion
+const EventEmitter = require('events');
+const roomEvents = new EventEmitter();
+
+// Room deleted event listener
+roomEvents.on('room:deleted', (roomId) => {
+  io.to(roomId).emit('room:deleted', { 
+    roomId,
+    message: 'This room has been deleted by the creator'
+  });
+  
+  // Disconnect all users from the room
+  io.in(roomId).socketsLeave(roomId);
+});
+
 // Create HTTP(S) server
 let server;
 const sslOptions = getSSLOptions();
 
-if (isProduction && sslOptions) {
+// Selalu gunakan HTTPS untuk mengaktifkan WSS
+if (sslOptions) {
   server = https.createServer(sslOptions, app);
-  console.log('Server running with SSL/TLS');
+  console.log('Server running with SSL/TLS - WSS enabled');
 } else {
+  console.error('SSL certificates not found! WSS requires HTTPS.');
+  console.log('Looking for certificates at certificates/server.key and certificates/server.crt');
   server = http.createServer(app);
-  console.log('Server running without SSL/TLS (development mode)');
+  console.log('Warning: Server running without SSL/TLS - WSS not available, falling back to WS');
 }
 
 // Socket.IO setup
@@ -116,6 +132,25 @@ io.on('connection', async (socket) => {
         text: joinMessage.text,
         type: joinMessage.type,
         createdAt: joinMessage.createdAt
+      });
+      
+      // Send welcome message (only to the joining user)
+      const welcomeMessage = new Message({
+        roomId,
+        userId: null,
+        text: `Welcome to ${room.name}! This is a secure chat room. Please be respectful to other users.`,
+        type: 'announcement'
+      });
+      await welcomeMessage.save();
+      
+      socket.emit('message:new', {
+        id: welcomeMessage._id,
+        roomId,
+        userId: null,
+        username: 'System',
+        text: welcomeMessage.text,
+        type: welcomeMessage.type,
+        createdAt: welcomeMessage.createdAt
       });
     } catch (error) {
       console.error('Error joining room:', error);
@@ -209,21 +244,6 @@ io.on('connection', async (socket) => {
     }
   });
   
-  // WebSocket Speed Test
-  socket.on('speed:test', ({ timestamp, payload }) => {
-    const receivedTime = Date.now();
-    const latency = receivedTime - timestamp;
-    
-    // Send response back with latency measurements
-    socket.emit('speed:result', {
-      sentTimestamp: timestamp,
-      receivedTimestamp: receivedTime,
-      responseTimestamp: Date.now(),
-      latency,
-      payloadSize: JSON.stringify(payload).length
-    });
-  });
-  
   // Handle disconnect
   socket.on('disconnect', async () => {
     try {
@@ -310,11 +330,6 @@ const broadcastAnnouncement = async (message, roomId = null) => {
   }
 };
 
-// Schedule announcements example (comment this out if not needed)
-// setInterval(() => {
-//   broadcastAnnouncement('This is an automated system message. Server is running normally.');
-// }, 1000 * 60 * 30); // Every 30 minutes
-
 // Setup inactive connection monitor
 const inactiveConnectionsInterval = setupInactiveConnectionsMonitor(io);
 
@@ -330,9 +345,6 @@ const connectWithRetry = () => {
       server.listen(PORT, () => {
         console.log(`Server running on port ${PORT}`);
       });
-
-      // Start gRPC server
-      startGrpcServer(GRPC_PORT);
     })
     .catch(err => {
       console.error('MongoDB connection error:', err);
@@ -367,195 +379,6 @@ app.post('/api/admin/announcement', async (req, res) => {
   }
 });
 
-// Add API endpoints for gRPC operations
-app.post('/api/grpc/join-room', async (req, res) => {
-  try {
-    const { roomId } = req.body;
-    const token = req.header('Authorization').replace('Bearer ', '');
-    
-    // Interact with gRPC client via server-side proxy
-    const { chatServiceImpl } = require('./grpc/grpcServer');
-    
-    chatServiceImpl.JoinRoom(
-      { request: { token, room_id: roomId } },
-      (err, response) => {
-        if (err || !response.success) {
-          return res.status(400).json({
-            success: false,
-            error_message: err?.message || response?.error_message || 'Failed to join room'
-          });
-        }
-        
-        res.json({
-          success: true,
-          room: response.room
-        });
-      }
-    );
-  } catch (error) {
-    console.error('gRPC join room error:', error);
-    res.status(500).json({ success: false, error_message: 'Server error' });
-  }
-});
-
-app.post('/api/grpc/leave-room', async (req, res) => {
-  try {
-    const { roomId } = req.body;
-    const token = req.header('Authorization').replace('Bearer ', '');
-    
-    // Interact with gRPC client via server-side proxy
-    const { chatServiceImpl } = require('./grpc/grpcServer');
-    
-    chatServiceImpl.LeaveRoom(
-      { request: { token, room_id: roomId } },
-      (err, response) => {
-        if (err || !response.success) {
-          return res.status(400).json({
-            success: false,
-            error_message: err?.message || response?.error_message || 'Failed to leave room'
-          });
-        }
-        
-        res.json({ success: true });
-      }
-    );
-  } catch (error) {
-    console.error('gRPC leave room error:', error);
-    res.status(500).json({ success: false, error_message: 'Server error' });
-  }
-});
-
-app.post('/api/grpc/send-message', async (req, res) => {
-  try {
-    const { roomId, text } = req.body;
-    const token = req.header('Authorization').replace('Bearer ', '');
-    
-    // Interact with gRPC client via server-side proxy
-    const { chatServiceImpl } = require('./grpc/grpcServer');
-    
-    chatServiceImpl.SendMessage(
-      { request: { token, room_id: roomId, text } },
-      (err, response) => {
-        if (err || !response.success) {
-          return res.status(400).json({
-            success: false,
-            error_message: err?.message || response?.error_message || 'Failed to send message'
-          });
-        }
-        
-        res.json({
-          success: true,
-          message: response.message
-        });
-      }
-    );
-  } catch (error) {
-    console.error('gRPC send message error:', error);
-    res.status(500).json({ success: false, error_message: 'Server error' });
-  }
-});
-
-app.post('/api/grpc/speed-test', async (req, res) => {
-  try {
-    const { timestamp, payload } = req.body;
-    const token = req.header('Authorization').replace('Bearer ', '');
-    
-    // Interact with gRPC client via server-side proxy
-    const { chatServiceImpl } = require('./grpc/grpcServer');
-    
-    chatServiceImpl.SpeedTest(
-      { 
-        request: { 
-          token, 
-          timestamp: timestamp.toString(),
-          payload: Buffer.from(payload)
-        }
-      },
-      (err, response) => {
-        if (err) {
-          return res.status(400).json({
-            success: false,
-            error_message: err.message || 'Speed test failed'
-          });
-        }
-        
-        res.json({
-          success: true,
-          sent_timestamp: parseInt(response.sent_timestamp),
-          received_timestamp: parseInt(response.received_timestamp),
-          response_timestamp: parseInt(response.response_timestamp),
-          latency: parseInt(response.latency),
-          payload_size: response.payload_size
-        });
-      }
-    );
-  } catch (error) {
-    console.error('gRPC speed test error:', error);
-    res.status(500).json({ success: false, error_message: 'Server error' });
-  }
-});
-
-// Server-Sent Events (SSE) endpoint for real-time gRPC streaming
-app.get('/api/grpc/stream', (req, res) => {
-  const roomId = req.query.roomId;
-  const token = req.query.token;
-  
-  if (!roomId || !token) {
-    return res.status(400).json({
-      success: false,
-      error_message: 'Room ID and token are required'
-    });
-  }
-  
-  // Set headers for SSE
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  
-  // Send initial connection message
-  res.write(`data: ${JSON.stringify({ event_type: 'connected', room_id: roomId })}\n\n`);
-  
-  // Setup message queue for this client
-  const messageQueue = [];
-  const clientId = Date.now();
-  
-  // Get gRPC service implementation
-  const { chatServiceImpl } = require('./grpc/grpcServer');
-  
-  // Add listener for room events
-  const listener = (data) => {
-    if (data.room_id === roomId) {
-      messageQueue.push(data);
-      res.write(`data: ${JSON.stringify(data)}\n\n`);
-    }
-  };
-  
-  // Add this client to the room's listeners
-  if (!chatServiceImpl.eventListeners) {
-    chatServiceImpl.eventListeners = new Map();
-  }
-  
-  if (!chatServiceImpl.eventListeners.has(roomId)) {
-    chatServiceImpl.eventListeners.set(roomId, new Map());
-  }
-  
-  chatServiceImpl.eventListeners.get(roomId).set(clientId, listener);
-  
-  // Handle client disconnect
-  req.on('close', () => {
-    if (chatServiceImpl.eventListeners && 
-        chatServiceImpl.eventListeners.has(roomId) &&
-        chatServiceImpl.eventListeners.get(roomId).has(clientId)) {
-      chatServiceImpl.eventListeners.get(roomId).delete(clientId);
-      
-      // Clean up empty maps
-      if (chatServiceImpl.eventListeners.get(roomId).size === 0) {
-        chatServiceImpl.eventListeners.delete(roomId);
-      }
-    }
-  });
-});
-
 // Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('Shutting down server...');
@@ -576,4 +399,4 @@ process.on('SIGINT', async () => {
 });
 
 // Export for testing
-module.exports = { app, server, io, broadcastAnnouncement };
+module.exports = { app, server, io, broadcastAnnouncement, roomEvents };

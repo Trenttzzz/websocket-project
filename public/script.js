@@ -6,14 +6,9 @@ const state = {
   activeRooms: [],
   socket: null,
   messages: {},
-  usingGrpc: false,
-  grpcClient: null,
-  activeStream: null,
   heartbeatInterval: null,
-  testResults: {
-    websocket: { latency: 0, throughput: 0 },
-    grpc: { latency: 0, throughput: 0 }
-  }
+  joinRoomTimeoutId: null, // ID untuk timeout proses join room
+  selectedRoom: null // Menambahkan state untuk room yang dipilih (belum tentu joined)
 };
 
 // DOM Elements
@@ -39,58 +34,53 @@ const elements = {
   createRoomForm: document.getElementById('create-room-form'),
   roomName: document.getElementById('room-name'),
   roomUsersCount: document.getElementById('room-users-count'),
+  joinRoomBtn: document.getElementById('join-room-btn'),
+  leaveRoomBtn: document.getElementById('leave-room-btn'),
   
   // Chat
   messageContainer: document.getElementById('message-container'),
   messageForm: document.getElementById('message-form'),
   messageInput: document.getElementById('message-input'),
-  sendBtn: document.getElementById('send-btn'),
-  
-  // Protocol Switch
-  protocolSwitch: document.getElementById('protocol-switch'),
-  protocolType: document.getElementById('protocol-type'),
-  
-  // Performance
-  testSize: document.getElementById('test-size'),
-  testWebSocket: document.getElementById('test-websocket'),
-  testGrpc: document.getElementById('test-grpc'),
-  wsLatency: document.getElementById('ws-latency'),
-  wsThoughput: document.getElementById('ws-throughput'),
-  grpcLatency: document.getElementById('grpc-latency'),
-  grpcThoughput: document.getElementById('grpc-throughput'),
-  performanceChart: document.getElementById('performance-chart')
+  sendBtn: document.getElementById('send-btn')
 };
 
 // API endpoints
 const API = {
   base: window.location.origin,
   auth: '/api/auth',
-  chat: '/api/chat',
-  grpc: ':50051', // gRPC server endpoint
+  chat: '/api/chat'
 };
-
-// Initialize Chart.js performance comparison
-let performanceChart = null;
 
 // Initialize the application
 function init() {
   // Check for stored token
   const storedToken = localStorage.getItem('authToken');
   const storedUser = localStorage.getItem('user');
+  const storedRoom = localStorage.getItem('currentRoom');
   
   if (storedToken && storedUser) {
     state.authToken = storedToken;
     state.user = JSON.parse(storedUser);
+    
+    // Restore current room if available
+    if (storedRoom) {
+      state.currentRoom = JSON.parse(storedRoom);
+    }
+    
     showChat();
     initializeSocket();
     fetchRooms();
+    
+    // Rejoin current room if was in one before refresh
+    if (state.currentRoom) {
+      setTimeout(() => {
+        joinRoom(state.currentRoom.id);
+      }, 1000); // Delay to ensure socket connection is established
+    }
   }
   
   // Event listeners
   setupEventListeners();
-  
-  // Initialize performance chart
-  initPerformanceChart();
 }
 
 // Setup all event listeners
@@ -98,28 +88,33 @@ function setupEventListeners() {
   // Auth
   elements.loginBtn.addEventListener('click', login);
   elements.registerBtn.addEventListener('click', register);
+  elements.logoutBtn = document.getElementById('logout-btn');
+  elements.logoutBtn.addEventListener('click', logout);
   
   // Room management
   elements.createRoomBtn.addEventListener('click', showCreateRoomModal);
   elements.closeModal.addEventListener('click', hideCreateRoomModal);
   elements.createRoomForm.addEventListener('submit', createRoom);
+  elements.joinRoomBtn.addEventListener('click', handleJoinRoomBtnClick);
+  elements.leaveRoomBtn.addEventListener('click', handleLeaveRoomBtnClick);
   
   // Chat
   elements.messageForm.addEventListener('submit', sendMessage);
   
-  // Protocol switch
-  elements.protocolSwitch.addEventListener('change', toggleProtocol);
-  
-  // Performance tests
-  elements.testWebSocket.addEventListener('click', testWebSocketPerformance);
-  elements.testGrpc.addEventListener('click', testGrpcPerformance);
-  
-  // Close modal on click outside
+  // Close modal on click outside, but not when clicking modal content
   window.addEventListener('click', (e) => {
     if (e.target === elements.modal) {
       hideCreateRoomModal();
     }
   });
+  
+  // Prevent modal closing when clicking inside modal content
+  document.querySelector('.modal-content').addEventListener('click', (e) => {
+    e.stopPropagation();
+  });
+  
+  // Tab visibility handler
+  document.addEventListener('visibilitychange', handleVisibilityChange);
 }
 
 // Authentication functions
@@ -224,6 +219,7 @@ function logout() {
   // Clear local storage
   localStorage.removeItem('authToken');
   localStorage.removeItem('user');
+  localStorage.removeItem('currentRoom');
   
   // Show login screen
   showLogin();
@@ -231,27 +227,24 @@ function logout() {
 
 // WebSocket initialization
 function initializeSocket() {
-  if (state.usingGrpc) {
-    // Using gRPC - don't initialize WebSocket
-    updateConnectionStatus(false);
-    return;
-  }
-  
   // Disconnect existing socket if any
   if (state.socket) {
     state.socket.disconnect();
   }
   
-  // Create new socket connection with auth token
+  // Force secure transport using WSS
   state.socket = io(API.base, {
     auth: {
       token: state.authToken
-    }
+    },
+    secure: true,
+    transports: ['websocket'],
+    rejectUnauthorized: false // Untuk development dengan self-signed certificates
   });
   
   // Socket events
   state.socket.on('connect', () => {
-    console.log('Connected to WebSocket');
+    console.log('Connected to WebSocket Secure (WSS)');
     updateConnectionStatus(true);
     
     // Setup heartbeat
@@ -278,8 +271,8 @@ function initializeSocket() {
   state.socket.on('user:joined', handleUserJoined);
   state.socket.on('user:left', handleUserLeft);
   state.socket.on('message:new', handleNewMessage);
+  state.socket.on('room:deleted', handleRoomDeleted);
   state.socket.on('heartbeat:ping', handleHeartbeatPing);
-  state.socket.on('speed:result', handleSpeedTestResult);
 }
 
 // Heartbeat setup for WebSocket connection
@@ -331,29 +324,73 @@ function renderRoomsList() {
   state.activeRooms.forEach(room => {
     const roomElement = document.createElement('div');
     roomElement.className = `room-item ${room.isFull ? 'full' : ''}`;
+    
+    // Tanda room yang sudah joined vs selected
     if (state.currentRoom && state.currentRoom.id === room.id) {
       roomElement.classList.add('active');
+    } else if (state.selectedRoom && state.selectedRoom.id === room.id) {
+      roomElement.classList.add('selected');
     }
     
+    // Check if current user is the creator of the room
+    const isCreator = room.createdBy === state.user.username;
+    
     roomElement.innerHTML = `
-      <div class="room-name">${room.name}</div>
-      <div class="room-info">${room.activeConnections}/${room.maxConnections} users</div>
+      <div class="room-item-content">
+        <div class="room-name">${room.name}</div>
+        <div class="room-info">${room.activeConnections}/${room.maxConnections} users</div>
+        ${isCreator ? '<button class="delete-room-btn" title="Delete Room"><i class="fas fa-trash"></i>Delete</button>' : ''}
+      </div>
     `;
     
-    roomElement.addEventListener('click', () => {
-      if (!room.isFull) {
-        joinRoom(room.id);
-      } else {
-        showNotification('This room is full', 'error');
+    roomElement.querySelector('.room-item-content').addEventListener('click', (e) => {
+      // Don't select if clicking on delete button
+      if (e.target.closest('.delete-room-btn')) {
+        e.stopPropagation();
+        return;
       }
+      
+      if (room.isFull && (!state.currentRoom || state.currentRoom.id !== room.id)) {
+        showNotification('This room is full', 'error');
+        return;
+      }
+      
+      // Pilih room (tidak otomatis join)
+      selectRoom(room);
     });
+    
+    // Add event listener for delete button if present
+    const deleteBtn = roomElement.querySelector('.delete-room-btn');
+    if (deleteBtn) {
+      deleteBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        deleteRoom(room.id);
+      });
+    }
     
     elements.roomsList.appendChild(roomElement);
   });
+  
+  // Perbarui status tombol
+  updateRoomButtonsState();
 }
 
 function showCreateRoomModal() {
   elements.modal.style.display = 'block';
+  
+  // Reset form fields
+  const roomNameInput = document.getElementById('room-name-input');
+  const roomDescription = document.getElementById('room-description');
+  const maxConnections = document.getElementById('max-connections');
+  
+  roomNameInput.value = '';
+  roomDescription.value = '';
+  maxConnections.value = '10';
+  
+  // Set focus on room name input after a short delay to ensure the modal is visible
+  setTimeout(() => {
+    roomNameInput.focus();
+  }, 100);
 }
 
 function hideCreateRoomModal() {
@@ -407,34 +444,78 @@ async function createRoom(e) {
 
 // Join/leave room
 function joinRoom(roomId) {
-  if (state.usingGrpc) {
-    joinRoomGrpc(roomId);
-  } else {
-    joinRoomWebsocket(roomId);
+  // Hapus timeout sebelumnya jika ada
+  if (state.joinRoomTimeoutId) {
+    clearTimeout(state.joinRoomTimeoutId);
+    state.joinRoomTimeoutId = null;
   }
-}
 
-function joinRoomWebsocket(roomId) {
   // Leave current room if needed
-  if (state.currentRoom) {
+  if (state.currentRoom && state.currentRoom.id !== roomId) {
     state.socket.emit('room:leave', { roomId: state.currentRoom.id });
+    // Reset current room state immediately for responsiveness
+    state.currentRoom = null;
+    elements.messageContainer.innerHTML = ''; // Kosongkan pesan dari room sebelumnya
+    elements.messageInput.disabled = true;
+    elements.sendBtn.disabled = true;
+    elements.roomName.textContent = 'Joining room...';
+    elements.roomUsersCount.textContent = '0 users';
+  } else if (state.currentRoom && state.currentRoom.id === roomId) {
+    // Jika sudah di room yang sama, tidak perlu join lagi
+    // Cukup pastikan input aktif
+    elements.messageInput.removeAttribute('disabled');
+    elements.sendBtn.removeAttribute('disabled');
+    elements.messageInput.focus();
+    return;
   }
   
   // Join new room
   state.socket.emit('room:join', { roomId });
   
+  // Set timeout untuk penanganan jika event 'room:joined' tidak diterima
+  state.joinRoomTimeoutId = setTimeout(() => {
+    showNotification('Failed to join room. Please try again.', 'error');
+    // Reset UI jika join gagal
+    elements.roomName.textContent = 'Select a Room';
+    elements.messageInput.disabled = true;
+    elements.sendBtn.disabled = true;
+    state.joinRoomTimeoutId = null;
+  }, 5000); // Timeout 5 detik
+
   // Listen for room joined event
   state.socket.once('room:joined', (data) => {
+    // Hapus timeout karena event sudah diterima
+    if (state.joinRoomTimeoutId) {
+      clearTimeout(state.joinRoomTimeoutId);
+      state.joinRoomTimeoutId = null;
+    }
+
+    // Pastikan event ini untuk room yang benar-benar ingin kita masuki
+    if (data.roomId !== roomId) {
+      console.warn('Received room:joined event for a different room.', { expected: roomId, received: data.roomId });
+      return; // Abaikan jika bukan untuk room yang dituju
+    }
+
     state.currentRoom = {
       id: data.roomId,
       name: data.name
     };
     
+    // Save current room to localStorage
+    localStorage.setItem('currentRoom', JSON.stringify(state.currentRoom));
+    
     // Update UI
     elements.roomName.textContent = data.name;
     elements.roomUsersCount.textContent = `${data.activeUsers} users`;
-    elements.messageInput.disabled = false;
-    elements.sendBtn.disabled = false;
+    
+    // Explicitly enable message input and send button
+    elements.messageInput.removeAttribute('disabled');
+    elements.sendBtn.removeAttribute('disabled');
+    
+    // Ensure the elements are focused and ready for typing
+    setTimeout(() => {
+      elements.messageInput.focus();
+    }, 100);
     
     // Fetch previous messages
     fetchMessages(roomId);
@@ -442,124 +523,6 @@ function joinRoomWebsocket(roomId) {
     // Update room list
     renderRoomsList();
   });
-}
-
-async function joinRoomGrpc(roomId) {
-  if (!state.grpcClient) {
-    showNotification('gRPC client not initialized', 'error');
-    return;
-  }
-  
-  try {
-    // Leave current room if any
-    if (state.currentRoom) {
-      await leaveRoomGrpc(state.currentRoom.id);
-    }
-    
-    // Close existing stream if any
-    if (state.activeStream) {
-      state.activeStream.cancel();
-      state.activeStream = null;
-    }
-    
-    // Join new room via gRPC
-    const response = await fetch(`${API.base}/api/grpc/join-room`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${state.authToken}`
-      },
-      body: JSON.stringify({ roomId })
-    });
-    
-    const data = await response.json();
-    
-    if (data.success) {
-      state.currentRoom = {
-        id: data.room.id,
-        name: data.room.name
-      };
-      
-      // Update UI
-      elements.roomName.textContent = data.room.name;
-      elements.roomUsersCount.textContent = `${data.room.active_connections} users`;
-      elements.messageInput.disabled = false;
-      elements.sendBtn.disabled = false;
-      
-      // Start message stream
-      setupGrpcMessageStream(roomId);
-      
-      // Fetch previous messages
-      fetchMessages(roomId);
-      
-      // Update room list
-      renderRoomsList();
-    } else {
-      showNotification(data.error_message || 'Failed to join room', 'error');
-    }
-  } catch (error) {
-    console.error('Error joining room via gRPC:', error);
-    showNotification('Error connecting to server', 'error');
-  }
-}
-
-async function leaveRoomGrpc(roomId) {
-  try {
-    await fetch(`${API.base}/api/grpc/leave-room`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${state.authToken}`
-      },
-      body: JSON.stringify({ roomId })
-    });
-    
-    // Close message stream
-    if (state.activeStream) {
-      state.activeStream.cancel();
-      state.activeStream = null;
-    }
-  } catch (error) {
-    console.error('Error leaving room via gRPC:', error);
-  }
-}
-
-// Setup gRPC message stream
-function setupGrpcMessageStream(roomId) {
-  // This would be implemented using a server-side proxy in a real app
-  // For now, we'll use server-sent events as a fallback
-  const evtSource = new EventSource(`${API.base}/api/grpc/stream?roomId=${roomId}&token=${state.authToken}`);
-  
-  evtSource.onmessage = function(event) {
-    const data = JSON.parse(event.data);
-    handleGrpcStreamEvent(data);
-  };
-  
-  evtSource.onerror = function() {
-    evtSource.close();
-  };
-  
-  // Store reference to close later
-  state.activeStream = {
-    cancel: () => evtSource.close()
-  };
-}
-
-function handleGrpcStreamEvent(data) {
-  switch (data.event_type) {
-    case 'new_message':
-      handleNewMessage(data.message);
-      break;
-    case 'user_joined':
-      handleUserJoined(data.user);
-      break;
-    case 'user_left':
-      handleUserLeft(data.user);
-      break;
-    case 'error':
-      showNotification(data.message.text, 'error');
-      break;
-  }
 }
 
 // WebSocket event handlers
@@ -590,9 +553,26 @@ function handleNewMessage(message) {
   if (state.currentRoom && state.currentRoom.id === message.roomId) {
     renderMessage(message);
     
-    // Scroll to bottom
-    elements.messageContainer.scrollTop = elements.messageContainer.scrollHeight;
+    // Autoscroll dihapus untuk membuat scroll manual
   }
+}
+
+// Handle room deleted event
+function handleRoomDeleted(data) {
+  if (state.currentRoom && state.currentRoom.id === data.roomId) {
+    state.currentRoom = null;
+    localStorage.removeItem('currentRoom');
+    elements.roomName.textContent = 'Select a Room';
+    elements.roomUsersCount.textContent = '0 users';
+    elements.messageContainer.innerHTML = '';
+    elements.messageInput.disabled = true;
+    elements.sendBtn.disabled = true;
+    
+    showNotification(data.message, 'info');
+  }
+  
+  // Refresh the rooms list
+  fetchRooms();
 }
 
 // Message functions
@@ -654,6 +634,8 @@ function renderMessage(message) {
   }
   
   elements.messageContainer.appendChild(messageElement);
+  
+  // Removed auto-scroll to enable manual scrolling
 }
 
 function sendMessage(e) {
@@ -662,246 +644,20 @@ function sendMessage(e) {
   const text = elements.messageInput.value.trim();
   if (!text || !state.currentRoom) return;
   
-  if (state.usingGrpc) {
-    sendMessageGrpc(text);
-  } else {
-    sendMessageWebsocket(text);
-  }
-  
-  // Clear input
-  elements.messageInput.value = '';
-}
-
-function sendMessageWebsocket(text) {
   state.socket.emit('message:send', {
     roomId: state.currentRoom.id,
     text
   });
-}
-
-async function sendMessageGrpc(text) {
-  try {
-    await fetch(`${API.base}/api/grpc/send-message`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${state.authToken}`
-      },
-      body: JSON.stringify({
-        roomId: state.currentRoom.id,
-        text
-      })
-    });
-  } catch (error) {
-    console.error('Error sending message via gRPC:', error);
-    showNotification('Failed to send message', 'error');
-  }
-}
-
-// Toggle between WebSocket and gRPC
-function toggleProtocol() {
-  const usingGrpc = elements.protocolSwitch.checked;
   
-  if (usingGrpc === state.usingGrpc) return;
+  // Ensure inputs remain enabled
+  elements.messageInput.removeAttribute('disabled');
+  elements.sendBtn.removeAttribute('disabled');
   
-  state.usingGrpc = usingGrpc;
-  elements.protocolType.textContent = usingGrpc ? 'gRPC' : 'WebSocket';
+  // Clear input
+  elements.messageInput.value = '';
   
-  // Handle protocol switch
-  if (usingGrpc) {
-    // Switch to gRPC
-    if (state.socket) {
-      state.socket.disconnect();
-    }
-    updateConnectionStatus(false);
-    
-    // Join current room with gRPC if applicable
-    if (state.currentRoom) {
-      joinRoomGrpc(state.currentRoom.id);
-    }
-  } else {
-    // Switch to WebSocket
-    if (state.activeStream) {
-      state.activeStream.cancel();
-      state.activeStream = null;
-    }
-    
-    // Initialize WebSocket
-    initializeSocket();
-    
-    // Join current room with WebSocket if applicable
-    if (state.currentRoom) {
-      joinRoomWebsocket(state.currentRoom.id);
-    }
-  }
-}
-
-// Performance testing
-function generateTestPayload(size) {
-  let payload = '';
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  
-  let byteSize;
-  switch (size) {
-    case 'small':
-      byteSize = 1024; // 1KB
-      break;
-    case 'medium':
-      byteSize = 10 * 1024; // 10KB
-      break;
-    case 'large':
-      byteSize = 100 * 1024; // 100KB
-      break;
-    default:
-      byteSize = 1024;
-  }
-  
-  // Generate random string
-  for (let i = 0; i < byteSize; i++) {
-    payload += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  
-  return payload;
-}
-
-function testWebSocketPerformance() {
-  if (!state.socket || !state.socket.connected) {
-    showNotification('WebSocket not connected', 'error');
-    return;
-  }
-  
-  const size = elements.testSize.value;
-  const payload = generateTestPayload(size);
-  
-  // Send test payload
-  const startTime = Date.now();
-  state.socket.emit('speed:test', {
-    timestamp: startTime,
-    payload
-  });
-}
-
-async function testGrpcPerformance() {
-  if (!(state.authToken)) {
-    showNotification('Not authenticated', 'error');
-    return;
-  }
-  
-  const size = elements.testSize.value;
-  const payload = generateTestPayload(size);
-  
-  try {
-    const startTime = Date.now();
-    
-    const response = await fetch(`${API.base}/api/grpc/speed-test`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${state.authToken}`
-      },
-      body: JSON.stringify({
-        timestamp: startTime,
-        payload
-      })
-    });
-    
-    const data = await response.json();
-    
-    if (data.success) {
-      const endTime = Date.now();
-      const latency = data.latency;
-      const payloadSize = data.payload_size;
-      const roundTripTime = endTime - startTime;
-      const throughput = Math.round((payloadSize / 1024) / (roundTripTime / 1000));
-      
-      // Update state
-      state.testResults.grpc = {
-        latency,
-        throughput
-      };
-      
-      // Update UI
-      elements.grpcLatency.textContent = `${latency}`;
-      elements.grpcThoughput.textContent = `${throughput}`;
-      
-      // Update chart
-      updatePerformanceChart();
-    } else {
-      showNotification('gRPC test failed', 'error');
-    }
-  } catch (error) {
-    console.error('gRPC test error:', error);
-    showNotification('Error testing gRPC performance', 'error');
-  }
-}
-
-function handleSpeedTestResult(data) {
-  const endTime = Date.now();
-  const roundTripTime = endTime - data.sentTimestamp;
-  const latency = data.latency;
-  const payloadSize = data.payloadSize;
-  const throughput = Math.round((payloadSize / 1024) / (roundTripTime / 1000));
-  
-  // Update state
-  state.testResults.websocket = {
-    latency,
-    throughput
-  };
-  
-  // Update UI
-  elements.wsLatency.textContent = `${latency}`;
-  elements.wsThoughput.textContent = `${throughput}`;
-  
-  // Update chart
-  updatePerformanceChart();
-}
-
-function initPerformanceChart() {
-  const ctx = elements.performanceChart.getContext('2d');
-  performanceChart = new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels: ['Latency (ms)', 'Throughput (KB/s)'],
-      datasets: [
-        {
-          label: 'WebSocket',
-          data: [0, 0],
-          backgroundColor: 'rgba(74, 111, 165, 0.7)',
-          borderColor: 'rgba(74, 111, 165, 1)',
-          borderWidth: 1
-        },
-        {
-          label: 'gRPC',
-          data: [0, 0],
-          backgroundColor: 'rgba(92, 184, 92, 0.7)',
-          borderColor: 'rgba(92, 184, 92, 1)',
-          borderWidth: 1
-        }
-      ]
-    },
-    options: {
-      responsive: true,
-      scales: {
-        y: {
-          beginAtZero: true
-        }
-      }
-    }
-  });
-}
-
-function updatePerformanceChart() {
-  performanceChart.data.datasets[0].data = [
-    state.testResults.websocket.latency,
-    state.testResults.websocket.throughput
-  ];
-  
-  performanceChart.data.datasets[1].data = [
-    state.testResults.grpc.latency,
-    state.testResults.grpc.throughput
-  ];
-  
-  performanceChart.update();
+  // Re-focus the input field
+  elements.messageInput.focus();
 }
 
 // UI functions
@@ -940,6 +696,172 @@ function showNotification(message, type) {
   setTimeout(() => {
     notification.remove();
   }, 3000);
+}
+
+// Handle room deletion
+async function deleteRoom(roomId) {
+  if (!confirm('Are you sure you want to delete this room? This action cannot be undone.')) {
+    return;
+  }
+  
+  try {
+    const response = await fetch(`${API.base}${API.chat}/rooms/${roomId}`, {
+      method: 'DELETE',
+      headers: {
+        'Authorization': `Bearer ${state.authToken}`
+      }
+    });
+    
+    const data = await response.json();
+    
+    if (data.success) {
+      // If we're in the deleted room, reset the UI
+      if (state.currentRoom && state.currentRoom.id === roomId) {
+        state.currentRoom = null;
+        localStorage.removeItem('currentRoom');
+        elements.roomName.textContent = 'Select a Room';
+        elements.roomUsersCount.textContent = '0 users';
+        elements.messageContainer.innerHTML = '';
+        elements.messageInput.disabled = true;
+        elements.sendBtn.disabled = true;
+      }
+      
+      // Refresh the rooms list
+      fetchRooms();
+      showNotification('Room deleted successfully', 'success');
+    } else {
+      showNotification(data.message || 'Failed to delete room', 'error');
+    }
+  } catch (error) {
+    console.error('Error deleting room:', error);
+    showNotification('Error connecting to server', 'error');
+  }
+}
+
+// Handle visibility change
+function handleVisibilityChange() {
+  if (document.visibilityState === 'visible') {
+    console.log('Tab is now visible, checking connection...');
+    
+    if (state.socket && !state.socket.connected) {
+      console.log('Socket disconnected while tab was hidden, reconnecting...');
+      initializeSocket();
+      
+      // Reconnect to current room if we have one
+      if (state.currentRoom) {
+        setTimeout(() => {
+          console.log('Rejoining room:', state.currentRoom.id);
+          joinRoom(state.currentRoom.id);
+        }, 1000);
+      }
+    }
+  }
+}
+
+// Fungsi untuk menangani klik tombol Join Room
+function handleJoinRoomBtnClick() {
+  // Memastikan ada room yang dipilih
+  const selectedRoom = state.selectedRoom;
+  if (!selectedRoom) {
+    showNotification('Please select a room first', 'error');
+    return;
+  }
+  
+  // Memastikan room tidak penuh
+  const room = state.activeRooms.find(room => room.id === selectedRoom.id);
+  if (room && room.isFull) {
+    showNotification('This room is full', 'error');
+    return;
+  }
+  
+  // Join room yang dipilih
+  joinRoom(selectedRoom.id);
+}
+
+// Fungsi untuk menangani klik tombol Leave Room
+function handleLeaveRoomBtnClick() {
+  // Memastikan kita berada dalam room
+  if (!state.currentRoom) {
+    showNotification('You are not in any room', 'error');
+    return;
+  }
+  
+  // Keluar dari room saat ini
+  leaveRoom(state.currentRoom.id);
+}
+
+// Fungsi untuk keluar dari room
+function leaveRoom(roomId) {
+  if (!state.currentRoom || state.currentRoom.id !== roomId) {
+    return;
+  }
+  
+  state.socket.emit('room:leave', { roomId });
+  
+  // Reset state dan UI
+  state.currentRoom = null;
+  localStorage.removeItem('currentRoom');
+  
+  // Update UI
+  elements.roomName.textContent = 'Select a Room';
+  elements.roomUsersCount.textContent = '0 users';
+  elements.messageContainer.innerHTML = '';
+  elements.messageInput.disabled = true;
+  elements.sendBtn.disabled = true;
+  
+  // Update button states
+  updateRoomButtonsState();
+  
+  showNotification('You have left the room', 'info');
+  
+  // Update room list to show the correct active status
+  renderRoomsList();
+}
+
+// Fungsi untuk memperbarui status tombol-tombol room
+function updateRoomButtonsState() {
+  // Join button aktif jika ada room dipilih dan kita belum join
+  if (state.selectedRoom && (!state.currentRoom || state.currentRoom.id !== state.selectedRoom.id)) {
+    elements.joinRoomBtn.removeAttribute('disabled');
+    elements.joinRoomBtn.classList.add('active');
+  } else {
+    elements.joinRoomBtn.setAttribute('disabled', 'disabled');
+    elements.joinRoomBtn.classList.remove('active');
+  }
+  
+  // Leave button aktif jika kita sudah join room
+  if (state.currentRoom) {
+    elements.leaveRoomBtn.removeAttribute('disabled');
+    elements.leaveRoomBtn.classList.add('active');
+  } else {
+    elements.leaveRoomBtn.setAttribute('disabled', 'disabled');
+    elements.leaveRoomBtn.classList.remove('active');
+  }
+}
+
+// Fungsi untuk memilih room (tanpa join)
+function selectRoom(room) {
+  // Simpan room yang dipilih dalam state
+  state.selectedRoom = {
+    id: room.id,
+    name: room.name
+  };
+  
+  // Update informasi room di header
+  elements.roomName.textContent = room.name;
+  elements.roomUsersCount.textContent = `${room.activeConnections}/${room.maxConnections} users`;
+  
+  // Clear pesan jika belum join room ini
+  if (!state.currentRoom || state.currentRoom.id !== room.id) {
+    elements.messageContainer.innerHTML = '';
+    elements.messageContainer.innerHTML = '<div class="message-prompt">Click "Join Room" button to join this room and start chatting</div>';
+  }
+  
+  // Update room list untuk menampilkan room yang dipilih
+  renderRoomsList();
+  
+  // Update status tombol
+  updateRoomButtonsState();
 }
 
 // Initialize application

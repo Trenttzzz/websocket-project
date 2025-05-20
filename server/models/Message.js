@@ -9,7 +9,10 @@ const MessageSchema = new mongoose.Schema({
   userId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
-    required: true
+    // userId hanya wajib untuk pesan tipe user
+    required: function() {
+      return this.type === 'user';
+    }
   },
   text: {
     type: String,

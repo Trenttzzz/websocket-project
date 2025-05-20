@@ -40,7 +40,7 @@ tmp/
 temp/
 
 # Certificates and keys (in production these should typically not be in git)
-# certificates/   # Uncomment this if you want to ignore certificates folder
+certificates/   # Uncomment this if you want to ignore certificates folder
 
 # Debug files
 .node_repl_history

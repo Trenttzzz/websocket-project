@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>WebSocket vs gRPC Chat Room</title>
+  <title>WebSocket Chat Room</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <div class="app-container">
     <header>
-      <h1>WebSocket vs gRPC Chat Application</h1>
+      <h1>WebSocket Chat Application</h1>
       <div id="connection-status">
         <span class="status-indicator offline"></span>
         <span class="status-text">Disconnected</span>
@@ -43,22 +43,19 @@
         <div id="rooms-list" class="rooms-list">
           <!-- Room list will be populated here -->
         </div>
-        <div class="protocol-switch">
-          <label>Protocol:</label>
-          <div class="switch-container">
-            <label class="switch">
-              <input type="checkbox" id="protocol-switch">
-              <span class="slider"></span>
-            </label>
-            <span id="protocol-type">WebSocket</span>
-          </div>
+        <div class="user-controls">
+          <button id="logout-btn" class="secondary-btn">Logout</button>
         </div>
       </div>
 
       <div class="chat-main">
         <div class="chat-header">
           <h2 id="room-name">Select a Room</h2>
-          <span id="room-users-count" class="users-count">0 users</span>
+          <div class="room-controls-header">
+            <button id="join-room-btn" class="primary-btn" disabled>Join Room</button>
+            <button id="leave-room-btn" class="secondary-btn" disabled>Leave Room</button>
+            <span id="room-users-count" class="users-count">0 users</span>
+          </div>
         </div>
         <div id="message-container" class="message-container">
           <!-- Messages will be populated here -->
@@ -67,33 +64,6 @@
           <input type="text" id="message-input" placeholder="Type a message..." disabled>
           <button type="submit" id="send-btn" disabled>Send</button>
         </form>
-      </div>
-      
-      <div class="performance-sidebar">
-        <h3>Performance Tests</h3>
-        <div class="test-controls">
-          <select id="test-size">
-            <option value="small">Small Payload (1KB)</option>
-            <option value="medium">Medium Payload (10KB)</option>
-            <option value="large">Large Payload (100KB)</option>
-          </select>
-          <button id="test-websocket" class="primary-btn">Test WebSocket</button>
-          <button id="test-grpc" class="primary-btn">Test gRPC</button>
-        </div>
-        <div class="test-results">
-          <h4>Results</h4>
-          <div id="websocket-results">
-            <h5>WebSocket</h5>
-            <p>Latency: <span id="ws-latency">-</span> ms</p>
-            <p>Throughput: <span id="ws-throughput">-</span> KB/s</p>
-          </div>
-          <div id="grpc-results">
-            <h5>gRPC</h5>
-            <p>Latency: <span id="grpc-latency">-</span> ms</p>
-            <p>Throughput: <span id="grpc-throughput">-</span> KB/s</p>
-          </div>
-          <canvas id="performance-chart"></canvas>
-        </div>
       </div>
     </div>
 
@@ -122,8 +92,6 @@
 
   <!-- Socket.io client library -->
   <script src="/socket.io/socket.io.js"></script>
-  <!-- Chart.js for performance visualization -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <!-- Application scripts -->
   <script src="script.js"></script>
 </body>
